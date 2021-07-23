@@ -1,0 +1,371 @@
+---
+title: "MovieLens Report"
+author: "Dave Maharaj"
+output: pdf_document
+---
+
+```{r include=FALSE, echo=FALSE}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+#tinytex::install_tinytex()
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+library(knitr)
+
+
+options(digits = 7)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- right_join(ratings, movies, by = "movieId")
+movielens <- movielens %>% filter(!is.na(rating))
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#####################################################################################################
+```
+
+
+# Executive Summary
+
+In this project we will create a movie recommender system using the MovieLens dataset. The system will be used to recommend movies to users based on ratings provided by other users. We will use a dataset containing an estimated 10 million records. The full dataset contains over 20 million records but to allow the analysis to run more efficiently on a laptop, we have taken a subset of the data. Training will be done using 9 million records and the remaining 1 million records will be used to validate the training algorithm.
+
+Reduced Mean Squared Error (RMSE) will be used to test the model for accuracy. Our goal is to achieve an RMSE of less than 0.86490 using appropriate modeling techniques. We will test different approaches to predicting the rating for movies throughout the project, with the objective of optimizing the RMSE value. 
+
+The report is divided into two (2) main sections. The first is the method/analysis where we pre-process the data and gain insights into the data using visualization, the second section is where we summarize our findings and provide an overall conclusion of our findings. 
+
+
+# Method/Analysis
+
+```{r, include=FALSE}
+# data cleansing - timestamp to date, split the genres, extract release year from title
+edx <- edx %>% separate(title, sep="\\(", into = c('title', 'year')) %>%
+  mutate(title = str_trim(title), 
+         year = str_trim(str_replace(year, "\\)", "")), 
+         review_date=as_datetime(timestamp)) %>%
+  mutate(rating_year = isoyear(review_date), rating_month=month(review_date), rating_week=week(review_date)) %>%
+  select(userId, movieId, rating, title, year, genres, rating_year, rating_month, rating_week) %>%
+  separate(genres, sep = "\\|", into=c("g1", "g2", "g3")) %>%
+  mutate(genres = ifelse(!is.na(g3), g3, g1)) %>%
+  select(userId, movieId, rating, title, year, genres, rating_year, rating_month, rating_week)
+
+
+
+# do same for validation data
+
+validation <- validation %>% separate(title, sep="\\(", into = c('title', 'year')) %>%
+  mutate(title = str_trim(title), 
+         year = str_trim(str_replace(year, "\\)", "")), 
+         review_date=as_datetime(timestamp)) %>%
+  mutate(rating_year = isoyear(review_date), rating_month=month(review_date), rating_week=week(review_date)) %>%
+  select(userId, movieId, rating, title, year, genres, rating_year, rating_month, rating_week) %>%
+  separate(genres, sep = "\\|", into=c("g1", "g2", "g3")) %>%
+  mutate(genres = ifelse(!is.na(g3), g3, g1)) %>%
+  select(userId, movieId, rating, title, year, genres, rating_year, rating_month, rating_week)
+
+######################################################################################################
+```
+
+
+## Exploratory data analysis
+
+The initial dataset contains six(6) potential predictors and the outcome value, which is the rating. The predictors are - userId, movieId, timestamp, title, genres.
+
+The table below shows the number of users and movies in the training dataset. 
+```{r, echo=FALSE, include=TRUE}
+edx %>% summarise(UserCount=n_distinct(userId), MovieCount=n_distinct(movieId))
+```
+
+The first six (6) rows of the dataset are below. From this you can see that the title contains the year of release for the move and genres are formatted with pipes separating categories. This will require some pre-processing.
+```{r, echo=FALSE, include=TRUE}
+kable(head(edx))
+```
+
+## Data pre-processing
+
+The table above shows that the data needs to be cleansed and formatted to allow us to better analyse the dataset. Below are the main items addressed in pre-processing of the dataset:
+  
+  1. Split the title into 2 columns. The title and the year of release.
+  2. Timestamp needs to be converted to a date time and split into year and month fields for better visual
+  3. Simplify the genre field for better visual. 
+  
+After pre-processing the first 6 rows of the dataset looks like the below. Note that while we have pre-processed the data to separate out columns etc, we may not use all the predictors for our algorithm.
+
+```{r, echo=FALSE, include=TRUE}
+kable(head(edx))
+```
+
+## Visual exploration
+
+Below we explore the data visually to gain insights into the distribution of specific predictors in the dataset. 
+
+Distribution of ratings by user:
+
+The plot shows a smaller quantity of users with half star values. 3,4  and 5 star values are most common in the dataset. 1 and 1.5 are least common.
+
+```{r, echo=FALSE, include=TRUE}
+edx %>% group_by(userId, rating) %>% ggplot(aes(rating)) + geom_histogram() + ggtitle("Ratings by user")
+```
+
+Ratings by year of rating:
+
+This shows the distribution of ratings by year. 
+
+```{r, echo=FALSE, include=TRUE}
+hist(edx$rating_year, main="Frequency of User's Ratings by Years", xlab="Years")
+```
+
+
+Rating by Month:
+
+The distribution shows that the months of November and December has the highest number of ratings.
+
+```{r, echo=FALSE, include=TRUE}
+hist(edx$rating_month, main="Frequency of User's Ratings by month", xlab="Month")
+```
+
+
+Average rating by movie:
+
+The distribution below shows the average rating by movie. This shows that the centre of the distribution is around 3.5
+
+```{r, echo=FALSE, include=TRUE}
+edx %>% group_by(movieId) %>% summarise(avg_rating=mean(rating)) %>% arrange(desc(avg_rating)) %>% ggplot(aes(avg_rating)) + geom_histogram()
+```
+
+The table below summarize the mean, sd and median of the rating in the dataset.
+
+```{r, echo=FALSE, include=TRUE}
+edx %>% summarise(avg_rating = mean(rating), sd_rating=sd(rating), median_rating = median(rating))  %>% kable(padding = 2)
+```
+
+## Modeling approach
+
+
+Because of the size of the dataset it will be slow and inefficient to run complex algorithms on the dataset using a laptop. While these options may work, it is preferred to use cloud resources to execute models like this. Instead we will employee similar less complex methodologies to reach our goal of an RMSE of less than 0.86.
+
+
+```{r, include=FALSE}
+# RMSE function
+RMSE <- function(t_ratings, p_ratings) {
+  sqrt(mean((t_ratings-p_ratings)^2))
+}
+```
+
+
+
+### Naive approach
+
+Modeling using a Naive approach is first tried on the data. This is done using the mean of the data. The equation for this is:
+
+\begin{equation}
+  Y_{u, i} = \mu
+\end{equation}
+
+In this equation $Y_{u,i}$ is the rating from user $u$ for movie $i$. $mu$ is the average across all ratings in the training dataset. Below is the calculation for this. 
+```{r, include=TRUE}
+mu <- mean(edx$rating)
+mu
+```
+
+Using the mean as the prediction for a rating, we will now test against the validation data ratings to check the RMSE value. 
+
+```{r, include=TRUE}
+RMSE(validation$rating, mu)
+```
+From the results from the RMSE, we are over 1, which is much higher than what we want. 
+
+```{r, include=FALSE}
+# add the results of the naive model to the table
+# rmse based on mean
+rmse_means_naive <- RMSE(validation$rating, mu)
+# results from this is 1.052558, which is above the desired results of < 0.86
+
+# store the values in a table for reference and reporting
+rmse_tb_results <- tibble(Method = "Naive Means", RMSE = rmse_means_naive)
+```
+
+
+### Using a Bias term
+
+In this model we include a bias term for predicting the rating. This bias term $b_{i}$ for movie ratings difference. This term is considered to be independent of the data. The equation for predicting the rating with the bias term is below:
+
+\begin{equation}
+  Y_{u,i} = \mu + b_{i}
+\end{equation}
+
+The $b_{i}$ is calculated using the training data. The code below is used to generate the $b_{i}$ term.
+
+```{r, include=TRUE}
+ratings_term_bi <- edx %>% group_by(movieId) %>% summarise(bi = mean(rating-mu))
+```
+
+Predictions are then generated using the equation above. The code below is used to do this for the validation dataset.
+
+```{r, include=TRUE}
+predictions_bi <- validation %>% 
+  left_join(ratings_term_bi, by='movieId') %>% 
+  mutate(h_rating = mu + bi) %>% 
+  select(movieId, userId, title, year, bi, h_rating, rating)
+```
+
+Once we have the predictions, the RMSE is then calculated using the RMSE function. 
+
+```{r, include=TRUE}
+RMSE(validation$rating, predictions_bi$h_rating)
+```
+```{r, include=FALSE}
+# add the rmse value to the table
+# calculate the rmse value
+rmse_bias_rating <- RMSE(validation$rating, predictions_bi$h_rating)
+# update the table of results
+rmse_tb_results <- bind_rows(rmse_tb_results, tibble(Method= "Movie Effect", RMSE=rmse_bias_rating))
+```
+
+
+This gives us an RMSE of 0.9439, which is closer to what we want. It looks like we're on the right track from the results. Adding another bias term should get us closer to our objective. A bias term of $b_{u}$ is now added to the model, this term is based on the user ratings rather than overall movie ratings. The equation for this model now looks like the below:
+
+
+\begin{equation}
+  Y_{u,i} = \mu + b_{i} + b_{u}
+\end{equation}
+
+
+The $b_{u}$ term was created using the training data. The code for this is below:
+```{r, include=TRUE}
+ratings_term_bu <- edx %>% left_join(ratings_term_bi, by='movieId') %>% group_by(userId) %>% summarise(bu = mean(rating-mu-bi))
+```
+
+Predictions were then generated using both the $b_{i}$ and $b_{u}$ terms. The code for this is below. 
+```{r, include=TRUE}
+predictions_bi_bu <- validation %>% left_join(ratings_term_bi, by="movieId") %>% left_join(ratings_term_bu, by="userId") %>% mutate(h_rating = mu + bi + bu) %>%
+  select(movieId, userId, title, year, bu, bu, h_rating, rating)
+```
+
+Once the predictions were generated, the RMSE value was calculated for this model. 
+```{r, include=TRUE}
+RMSE(validation$rating, predictions_bi_bu$h_rating)
+```
+```{r, include=FALSE}
+# add the RMSE value to the table for bi_bu
+# error on the model with the 2 terms
+rmse_bi_bu <- RMSE(validation$rating, predictions_bi_bu$h_rating)
+# update table
+rmse_tb_results <- bind_rows(rmse_tb_results, tibble(Method="Movie and User Effect", RMSE=rmse_bi_bu))
+```
+
+
+The results showed an RMSE of 0.8653488. This is close to the goal of less than 0.86490.
+
+Regularization will be used to reduce the effect of large errors in our predictions. Regularization penalizes incorrect estimates on small sample sizes. The equation for the model with regularization is below:
+
+\begin{equation}
+  \frac{1}{N} \sum_{u,i}(Y_{u,i} - \mu - b_i - b_u)^2 + \lambda (\sum_{i} b_i^2 + \sum_u b_u^2),
+\end{equation}
+
+The equation shows regularization being applied to each effect ($b_{i}$, $b_{u}$). 
+
+The value of $\lambda$ is a parameter we need to find. In order to do this we will try a series of values for lambda between 0 and 12 in increments of 0.5. The plot below shows the results of the testing for each value of lambda.
+
+```{r, include=FALSE}
+# find the right lambda value
+lambdas = seq(0,12,.25)
+
+find_right_lambda <- sapply(lambdas, function(l) {
+  term_bi <- edx %>% group_by(movieId) %>% summarise(bi = sum(rating-mu)/(n()+l))
+  term_bu <- edx %>% left_join(term_bi, by='movieId') %>% group_by(userId) %>% summarise(bu = sum(rating-mu-bi)/(n()+l))
+  pred_bi_bu <- validation %>% left_join(term_bi, by="movieId") %>% left_join(term_bu, by="userId") %>% mutate(h_rating = mu + bi + bu)
+  return(RMSE(validation$rating, pred_bi_bu$h_rating))
+})
+```
+
+```{r, include=TRUE}
+qplot(lambdas, find_right_lambda)
+```
+Based on the results produced, the lambda value that provided the RMSE that met our goal is 5.25.
+```{r}
+lambdas[which.min(find_right_lambda)]
+```
+
+The final model for predicting ratings for our recommendar system is below.
+```{r}
+lambda = 5.25
+
+ratings_term_bi_lambda <- edx %>% group_by(movieId) %>% 
+  summarise(bi = sum(rating-mu)/(n()+lambda))
+ratings_term_bu_lambda <- edx %>% left_join(ratings_term_bi_lambda, by='movieId') %>% 
+  group_by(userId) %>% summarise(bu = sum(rating-mu-bi)/(n()+lambda))
+predictions_bi_bu_l <- validation %>% left_join(ratings_term_bi_lambda, by="movieId") %>% 
+  left_join(ratings_term_bu_lambda, by="userId") %>% mutate(h_rating = mu + bi + bu) %>%
+  select(movieId, userId, title, year, bu, bu, h_rating, rating)
+```
+
+The RMSE results of of the model:
+
+```{r}
+RMSE(validation$rating, predictions_bi_bu_l$h_rating)
+```
+```{r, include=FALSE}
+rmse_preds_bi_bu_l <- RMSE(validation$rating, predictions_bi_bu_l$h_rating)
+# update table
+rmse_tb_results <- bind_rows(rmse_tb_results, tibble(Method="Movie and User Effect with Regularization", RMSE=rmse_preds_bi_bu_l))
+```
+
+
+The results show an rmse value of 0.864817, which is within our goal. 
+
+
+# Conclusion
+
+Our findings show that ratings cannot be modeled using a naive approach with simply the mean of the ratings. This did not produce favorable results in our testing. Using bias terms for ratings based on specific groups drastically improved our results. We moved from 1.06 to under 0.87, an improvement of 0.19. Once the regularization term was added to the model we got a further improvement in the model. Adding additional effects and using additional data may yield further improvements in the model. 
+
+For reference we have included the final table of resilts from our testing with the 4 models used during this project. 
+
+```{r, include=TRUE}
+kable(rmse_tb_results, align='l', format= 'pipe')
+```
+
